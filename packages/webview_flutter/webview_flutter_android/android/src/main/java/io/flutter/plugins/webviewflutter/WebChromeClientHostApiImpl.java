@@ -39,9 +39,12 @@ import android.content.ClipData;
 import android.webkit.ValueCallback;
 import android.provider.MediaStore;
 import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
@@ -65,7 +68,6 @@ public class WebChromeClientHostApiImpl implements WebChromeClientHostApi {
 
   private static final String[] perms = {Manifest.permission.CAMERA};
   private static final int REQUEST_CAMERA = 1;
-
   private static Uri cameraUri;
 
   /**
@@ -151,17 +153,39 @@ public class WebChromeClientHostApiImpl implements WebChromeClientHostApi {
 
     //For Android  >= 4.1
     public void openFileChooser(ValueCallback<Uri> valueCallback, String acceptType, String capture) {
-      Log.v(TAG, "openFileChooser Android  >= 4.1");
+      Log.v(TAG, "openFileChooser Android  >= 4.1 " + capture);
       uploadMessage = valueCallback;
-      takePhotoOrOpenGallery();
+      String[] acceptTypes = acceptType.split(";");
+      List<String> captureTypes = Arrays.stream(acceptTypes).filter((e) -> e.contains("video") || e.contains("image")).collect(Collectors.toList());
+      if (capture == null || "".equals(capture)) {
+        takePhotoOrOpenGallery(captureTypes);
+      } else if ("video".equals(capture)) {
+        openCamera();
+      } else {
+        openCamera();
+      }
     }
 
     // For Android >= 5.0
     @Override
     public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
-      Log.v(TAG, "openFileChooser Android >= 5.0");
+      Log.v(TAG, "openFileChooser Android >= 5.0 " + "isCaptureEnabled: " + fileChooserParams.isCaptureEnabled() + " acceptType: " + Arrays.asList(fileChooserParams.getAcceptTypes()));
       uploadMessageAboveL = filePathCallback;
-      takePhotoOrOpenGallery();
+      List<String> captureTypes = Arrays.stream(fileChooserParams.getAcceptTypes()).filter((e) -> e.contains("video") || e.contains("image")).collect(Collectors.toList());
+      Log.v(TAG, "captureTypes: " + captureTypes);
+      if (fileChooserParams.isCaptureEnabled()) {
+        boolean captureByVideoOnly = captureTypes.size() == 1 && captureTypes.get(0).contains("video");
+        boolean captureByImageOnly = captureTypes.size() == 1 && captureTypes.get(0).contains("image");
+        if (captureByVideoOnly) {
+          openVideo();
+        } else if (captureByImageOnly) {
+          openCamera();
+        } else {
+          takePhotoOrOpenGallery(captureTypes);
+        }
+      } else {
+        takePhotoOrOpenGallery(captureTypes);
+      }
       return true;
     }
 
@@ -246,12 +270,21 @@ public class WebChromeClientHostApiImpl implements WebChromeClientHostApi {
     WebViewFlutterPlugin.activity.startActivityForResult(chooser, FILE_CHOOSER_RESULT_CODE);
   }
 
-  private static void takePhotoOrOpenGallery() {
+  private static void takePhotoOrOpenGallery(List<String> captureTypes) {
     if (WebViewFlutterPlugin.activity==null||!FileUtil.checkSDcard(WebViewFlutterPlugin.activity)) {
       return;
     }
-    String[] selectPicTypeStr = {WebViewFlutterPlugin.activity.getString(R.string.take_photo),
-            WebViewFlutterPlugin.activity.getString(R.string.photo_library)};
+    List<String> selectTypes = new ArrayList<>();
+    selectTypes.add(WebViewFlutterPlugin.activity.getString(R.string.photo_library));
+    boolean isPickImage = captureTypes.stream().anyMatch((e) -> e.contains("image"));
+    if (isPickImage) {
+      selectTypes.add(WebViewFlutterPlugin.activity.getString(R.string.take_photo));
+    }
+    boolean isPickVideo = captureTypes.stream().anyMatch((e) -> e.contains("video"));
+    if (isPickVideo) {
+      selectTypes.add(WebViewFlutterPlugin.activity.getString(R.string.take_video));
+    }
+    String[] selectPicTypeStr = selectTypes.toArray(new String[]{});
     new AlertDialog.Builder(WebViewFlutterPlugin.activity, AlertDialog.THEME_DEVICE_DEFAULT_DARK)
             .setOnCancelListener(new ReOnCancelListener())
             .setItems(selectPicTypeStr,
@@ -259,14 +292,20 @@ public class WebChromeClientHostApiImpl implements WebChromeClientHostApi {
                       @Override
                       public void onClick(DialogInterface dialog, int which) {
                         switch (which) {
-                          // 相机拍摄
-                          case 0:
-                            openCamera();
-                            break;
                           // 手机相册
-                          case 1:
+                          case 0:
                             openImageChooserActivity();
                             break;
+                          // 相机拍摄
+                          case 1:
+                            if (isPickImage) {
+                              openCamera();
+                            } else {
+                              openVideo();
+                            }
+                            break;
+                          case 2:
+                            openVideo();
                           default:
                             break;
                         }
@@ -315,6 +354,45 @@ public class WebChromeClientHostApiImpl implements WebChromeClientHostApi {
         }
         //启动相机程序
         Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        intent.putExtra(MediaStore.EXTRA_OUTPUT, cameraUri);
+        WebViewFlutterPlugin.activity.startActivityForResult(intent, REQUEST_CAMERA);
+      } catch (Exception e) {
+        Toast.makeText(application, e.getMessage(), Toast.LENGTH_SHORT).show();
+        if (uploadMessageAboveL != null) {
+          uploadMessageAboveL.onReceiveValue(null);
+          uploadMessageAboveL = null;
+        }
+      }
+    } else {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        ActivityCompat.requestPermissions(WebViewFlutterPlugin.activity, perms, REQUEST_CAMERA);
+      }
+    }
+  }
+
+  /**
+   * 打开摄像
+   */
+  private static void openVideo() {
+    if (WebViewFlutterPlugin.activity == null) {
+      android.widget.Toast.makeText(application, "activity can not null", Toast.LENGTH_SHORT).show();
+      return;
+    }
+    if (hasPermissions(WebViewFlutterPlugin.activity, perms)) {
+      try {
+        //创建File对象，用于存储拍照后的照片
+        File outputImage = FileUtil.createVideoFile(WebViewFlutterPlugin.activity);
+        if (outputImage.exists()) {
+          outputImage.delete();
+        }
+        outputImage.createNewFile();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+          cameraUri = FileProvider.getUriForFile(WebViewFlutterPlugin.activity, WebViewFlutterPlugin.activity.getPackageName() + ".fileprovider", outputImage);
+        } else {
+          Uri.fromFile(outputImage);
+        }
+        //启动相机程序
+        Intent intent = new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
         intent.putExtra(MediaStore.EXTRA_OUTPUT, cameraUri);
         WebViewFlutterPlugin.activity.startActivityForResult(intent, REQUEST_CAMERA);
       } catch (Exception e) {

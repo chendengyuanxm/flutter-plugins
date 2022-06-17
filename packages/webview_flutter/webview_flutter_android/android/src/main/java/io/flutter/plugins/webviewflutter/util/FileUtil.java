@@ -238,6 +238,13 @@ public class FileUtil {
         return File.createTempFile(imageFileName, JPEG_FILE_SUFFIX, ctx.getExternalCacheDir());
     }
 
+    public static File createVideoFile(Context ctx) throws IOException {
+        // Create an image file name
+        String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
+        String imageFileName = VIDEO_FILE_PREFIX + timeStamp + "_";
+        return File.createTempFile(imageFileName, VIDEO_FILE_SUFFIX, ctx.getExternalCacheDir());
+    }
+
 
     /**
      * 获取文件长度
